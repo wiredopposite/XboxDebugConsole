@@ -1,2 +1,2 @@
 # XboxDebugConsole
-A console application used to debug original Xbox applications on real hardware over LAN.
+A command line tool used to debug original Xbox applications on real hardware over LAN.
