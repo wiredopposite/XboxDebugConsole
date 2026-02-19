@@ -21,7 +21,6 @@ Launch params:
 - ```mute``` Optional. Mutes the notifications from the Xbox on launch.
 
 Commands:
-
 - ```scan``` Scans the network for available Xbox consoles.
     - ```timeoutMs``` Optional. Time in milliseconds to wait for responses. Default is 5000.
 - ```connect``` Connects to an Xbox console by IP address, name, or first available.
