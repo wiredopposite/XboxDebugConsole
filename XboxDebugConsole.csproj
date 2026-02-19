@@ -1,0 +1,48 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <PlatformTarget>x86</PlatformTarget>
+  </PropertyGroup>
+
+  <ItemGroup>
+  	<Compile Remove="ViridiX\**" />
+  	<EmbeddedResource Remove="ViridiX\**" />
+  	<None Remove="ViridiX\**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="Program - Copy.cs" />
+  </ItemGroup>
+	
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+    <PackageReference Include="System.CommandLine" Version="2.0.3" />
+  </ItemGroup>
+
+  <ItemGroup>
+  	<ProjectReference Include="ViridiX\ViridiX.Linguist\ViridiX.Linguist.csproj">
+  		<Private>true</Private>
+  	</ProjectReference>
+  	<ProjectReference Include="ViridiX\ViridiX.Mason\ViridiX.Mason.csproj">
+  		<Private>true</Private>
+  	</ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Reference Include="Interop.Dia2Lib">
+      <HintPath>DiaSdk\Interop.Dia2Lib.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+  	<Content Include="DiaSdk\msdia140.dll">
+  	  <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+  	</Content>
+  </ItemGroup>
+	
+</Project>
