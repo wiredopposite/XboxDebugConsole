@@ -1,25 +1,34 @@
 ﻿using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using System;
+using System.Text;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.CommandLine;
 using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.IO.Ports;
 using System.Linq;
 using System.Net;
-//using System.CommandLine;
-//using System.Threading.Tasks;
-//using System;
 using System.Reflection;
 
 using ViridiX.Linguist;
 using ViridiX.Linguist.Network;
 using ViridiX.Linguist.Process;
 using ViridiX.Mason.Logging;
+using XboxDebugConsole.Command;
+using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace XboxDebugConsole
 {
+    internal class XboxNotification
+    {
+        public string Type { get; set; } = "notification";
+        public string Timestamp { get; set; } = string.Empty;
+        public string Message { get; set; } = string.Empty;
+    }
+
     internal class Application
     {
         private static Xbox? _Xbox = null;
@@ -27,10 +36,10 @@ namespace XboxDebugConsole
         private static Dictionary<uint, byte[]> _Breakpoints = new Dictionary<uint, byte[]>();
         private static bool _IsRunning = true;
         private static bool _JsonMode = false;
-        private const string _DashPath = @"\Device\Harddisk0\Partition1\xboxdash.xbe";
-        private static bool _ProcessingCommand = false;
-        private static bool _NotificationsMuted = false;
+        private const string _DashPath = @"B:\xboxdash.xbe";
         private static SymbolManager _SymbolManager = new SymbolManager();
+        private static bool _NotificationsMuted = false;
+        private static ConcurrentQueue<XboxNotification> _XboxNotifications = new ConcurrentQueue<XboxNotification>();
 
         static void Main(string[] args)
         {
@@ -48,323 +57,258 @@ namespace XboxDebugConsole
 
             if (_JsonMode)
             {
-                string? line;
-                bool err = false;
-
-                while (_IsRunning && !err)
-                {
-                    while ((line = Console.ReadLine()) != null)
-                    {
-                        try
-                        {
-                            _ProcessingCommand = true;
-                            ProcessInputJson(line);
-                            Console.Out.Flush();
-                            _ProcessingCommand = false;
-                        }
-                        catch (Exception ex)
-                        {
-                            WriteError(Command.Unknown, ex.Message);
-                            Console.Out.Flush();
-                            err = true;
-                            break;
-                        }
-                    }
-                }
+                AppTaskJson();
 
             }
             else
             {
-                _Logger = new SeriLogger(LogLevel.Info);
-
-                Console.Title = "Xbox Debug Console";
-                Console.WriteLine("==== Xbox Debug Console ====");
-                Console.WriteLine("Type 'help' or '?' for a list of commands.");
-
-                while (_IsRunning)
-                {
-                    try
-                    {
-                        Console.Write(_Xbox != null ? "Xbox> " : "> ");
-                        string? input = Console.ReadLine()?.Trim();
-
-                        if (string.IsNullOrEmpty(input))
-                        {
-                            continue;
-                        }
-
-                        _ProcessingCommand = true;
-                        ProcessInput(input);
-                        _ProcessingCommand = false;
-                    }
-                    catch (Exception ex)
-                    {
-                        WriteError(Command.Unknown, ex.Message);
-                    }
-                }
+                AppTask();
             }
 
             Cleanup();
         }
 
-        private static void ProcessInput(string input)
+        private static void AppTask()
         {
-            if (!CommandParser.TryParse(input, out var request, out var error))
+            _Logger = new SeriLogger(LogLevel.Info);
+
+            Console.Title = "Xbox Debug Console";
+            Console.WriteLine("==== Xbox Debug Console ====");
+            Console.WriteLine("Type 'help' or '?' for a list of commands.");
+
+            while (_IsRunning)
             {
-                WriteError(Command.Unknown, error ?? "Invalid command.");
-                return;
-            }
+                Console.Write(_Xbox != null ? "Xbox> " : "> ");
+                string? input = Console.ReadLine()?.Trim();
 
-            ProcessCommandRequest(request);
-        }
+                if (string.IsNullOrEmpty(input))
+                {
+                    continue;
+                }
 
-        private static void ProcessInputJson(string input)
-        {
-            if (!JsonCommandParser.TryParse(input, out var request, out var error))
-            {
-                WriteError(Command.Unknown, error ?? "Invalid command payload.");
-                return;
-            }
-
-            ProcessCommandRequest(request);
-        }
-
-        private static void ProcessCommandRequest(CommandRequest request)
-        {
-            switch (request.Command)
-            {
-                case Command.Scan:
-                    var scanArgs = request.Payload as ScanArgs ?? new ScanArgs();
-                    Scan(request.Command, scanArgs.TimeoutMs);
-                    break;
-
-                case Command.Connect:
-                    var connectArgs = request.Payload as ConnectArgs ?? new ConnectArgs();
-                    Connect(request.Command, connectArgs.Ip, connectArgs.Name, connectArgs.TimeoutMs);
-                    break;
-
-                case Command.Disconnect:
-                    Disconnect(request.Command);
-                    break;
-
-                case Command.LoadSymbols:
-                    if (request.Payload is not LoadSymbolsArgs loadArgs)
-                    {
-                        WriteError(request.Command, "pdbPath is required for loadSymbols command.");
-                        break;
-                    }
-
-                    LoadSymbols(request.Command, loadArgs);
-                    break;
-
-                case Command.SetBreakpoint:
-                case Command.DeleteBreakpoint:
-                    if (request.Payload is not BreakpointArgs breakpointArgs || breakpointArgs.Breakpoints.Count == 0)
-                    {
-                        WriteError(request.Command, "breakpoints are required for breakpoint commands.");
-                        break;
-                    }
-
-                    foreach (var spec in breakpointArgs.Breakpoints)
-                    {
-                        var address = ResolveBreakpointAddress(spec);
-                        if (address == null)
-                        {
-                            WriteError(request.Command, "Unable to resolve breakpoint address.");
-                            continue;
-                        }
-
-                        if (request.Command == Command.SetBreakpoint)
-                        {
-                            SetBreakpoint(request.Command, address);
-                        }
-                        else
-                        {
-                            DeleteBreakpoint(request.Command, address);
-                        }
-                    }
-                    break;
-
-                case Command.Pause:
-                    Pause(request.Command);
-                    break;
-
-                case Command.Continue:
-                    Continue(request.Command);
-                    break;
-
-                case Command.ReadMemory:
-                    if (request.Payload is not MemoryReadArgs readArgs)
-                    {
-                        WriteError(request.Command, "address and length are required for read command.");
-                        break;
-                    }
-
-                    ReadMemory(request.Command, readArgs.Address, readArgs.Length);
-                    break;
-
-                case Command.DumpMemory:
-                    if (request.Payload is not MemoryDumpArgs dumpArgs)
-                    {
-                        WriteError(request.Command, "address, length, and localPath are required for dump command.");
-                        break;
-                    }
-
-                    DumpMemory(request.Command, dumpArgs.Address, dumpArgs.Length, dumpArgs.LocalPath);
-                    break;
-
-                case Command.WriteMemory:
-                    if (request.Payload is not MemoryWriteArgs writeArgs)
-                    {
-                        WriteError(request.Command, "address and data are required for write command.");
-                        break;
-                    }
-
-                    WriteMemory(request.Command, writeArgs.Address, writeArgs.Data);
-                    break;
-
-                case Command.Registers:
-                    var threadArgs = request.Payload as ThreadArgs ?? new ThreadArgs();
-                    GetRegisters(request.Command, threadArgs.ThreadId);
-                    break;
-
-                case Command.Modules:
-                    GetModules(request.Command);
-                    break;
-
-                case Command.Threads:
-                    GetThreads(request.Command);
-                    break;
-
-                case Command.Regions:
-                    GetRegions(request.Command);
-                    break;
-
-                case Command.Upload:
-                    if (request.Payload is not UploadArgs uploadArgs)
-                    {
-                        WriteError(request.Command, "localPath and remotePath are required for upload command.");
-                        break;
-                    }
-
-                    UploadFile(request.Command, uploadArgs.LocalPath, uploadArgs.RemotePath);
-                    break;
-
-                case Command.Launch:
-                    if (request.Payload is not LaunchArgs launchArgs)
-                    {
-                        WriteError(request.Command, "remotePath is required for launch command.");
-                        break;
-                    }
-
-                    LaunchFile(request.Command, launchArgs.RemotePath);
-                    break;
-
-                case Command.LaunchDash:
-                    LaunchFile(request.Command, _DashPath);
-                    break;
-
-                case Command.Reboot:
-                    var rebootArgs = request.Payload as RebootArgs ?? new RebootArgs();
-                    Reboot(request.Command, rebootArgs.AutoReconnect, rebootArgs.TimeoutMs);
-                    break;
-
-                case Command.Quit:
-                case Command.Exit:
-                    _IsRunning = false;
-                    break;
-
-                case Command.Question:
-                case Command.Help:
-                    if (!_JsonMode)
-                    {
-                        PrintHelp();
-                    }
-                    else
-                    {
-                        WriteError(request.Command, "Help command is not available in JSON mode.");
-                    }
-                    break;
-
-                default:
-                    WriteError(Command.Unknown, "Unknown command.");
-                    break;
+                ProcessInput(input);
+                Console.Out.Flush();
+                ProcessNotifications();
+                Console.Out.Flush();
             }
         }
 
-        private static string? ResolveBreakpointAddress(BreakpointSpec spec)
+        private static void AppTaskJson()
         {
-            if (!string.IsNullOrWhiteSpace(spec.Address))
-                return spec.Address;
+            string? line;
+            //bool err = false;
 
-            if (!string.IsNullOrWhiteSpace(spec.File) && spec.Line.HasValue)
+            while (_IsRunning)
             {
-                var address = _SymbolManager.GetAddressForLine(spec.File, spec.Line.Value);
-                if (address.HasValue)
-                    return $"0x{address.Value:X8}";
+                while (_IsRunning && ((line = Console.ReadLine()) != null))
+                {
+                    ProcessInput(line);
+                    Console.Out.Flush();
+                    ProcessNotifications();
+                    Console.Out.Flush();
+                }
             }
-
-            return null;
         }
 
-        private static void LoadSymbols(Command command, LoadSymbolsArgs args)
+        private static void ProcessNotifications()
         {
-            if (!_SymbolManager.LoadPdb(args.PdbPath))
+            while (_XboxNotifications.TryDequeue(out var notification))
             {
-                WriteError(command, "Failed to load symbols.");
-                return;
+                if (_JsonMode)
+                {
+                    Console.WriteLine(JsonConvert.SerializeObject(notification));
+                }
+                else
+                {
+                    Console.ForegroundColor = ConsoleColor.Yellow;
+                    PrintObject(notification);
+                    Console.ResetColor();
+                }
             }
-
-            if (args.ImageBase.HasValue)
-                _SymbolManager.SetImageBase(args.ImageBase.Value);
-
-            WriteSuccess(command, "Symbols loaded.");
         }
 
-        static void WriteNotification(string messageStr)
+        private static void HandleResponse(Command.Response response)
         {
-            if (_NotificationsMuted)
-            {
-                return;
-            }
-
-            while (_ProcessingCommand)
-            {
-                // If we're currently processing a command, wait a bit before writing the notification
-                // This helps prevent interleaving notification output with command results
-                System.Threading.Thread.Sleep(100);
-            }
-
-            var response = new
-            {
-                type = "notification",
-                timestamp = DateTime.UtcNow,
-                message = messageStr
-            };
-
             if (_JsonMode)
             {
                 Console.WriteLine(JsonConvert.SerializeObject(response));
             }
             else
             {
-                Console.ForegroundColor = ConsoleColor.Yellow;
-                Console.Write("\n");
+                Console.ForegroundColor = response.Result ? ConsoleColor.Green : ConsoleColor.Red;
                 PrintObject(response);
                 Console.ResetColor();
-                Console.Write("Xbox> ");
             }
-
-            Console.Out.Flush();
         }
 
-        static void Scan(Command command, int timeoutMs = 5000)
+        private static void ProcessInput(string input)
         {
-            var availableXboxes = Xbox.Discover(timeoutMs, _Logger);
+            if (_JsonMode)
+            {
+                if (!Command.ParserJson.TryParse(input, out var request, out var error))
+                {
+                    HandleResponse(
+                        GenericError(
+                            new Command.Request(Command.Type.Unknown, null), error ?? "Invalid command payload."));
+                    return;
+                }
+
+                ProcessRequest(request);
+            }
+            else
+            {
+                if (!Command.Parser.TryParse(input, out var request, out var error))
+                {
+                    HandleResponse(
+                        GenericError(
+                            new Command.Request(Command.Type.Unknown, null), error ?? "Invalid command."));
+                    return;
+                }
+
+                ProcessRequest(request);
+            }
+        }   
+
+        private static void ProcessRequest(Command.Request request)
+        {
+            Command.Response? response = null;
+
+            switch (request.Type)
+            {
+                case Command.Type.Scan:
+                    response = Scan(request);
+                    break;
+                case Command.Type.Connect:
+                    response = Connect(request);
+                    break;
+                case Command.Type.Disconnect:
+                    response = Disconnect(request);
+                    break;
+                case Command.Type.LoadSymbols:
+                    response = LoadSymbols(request);
+                    break;
+                case Command.Type.SetBreakpoint:
+                    response = SetBreakpoints(request);
+                    break;
+                case Command.Type.DeleteBreakpoint:
+                    response = DeleteBreakpoints(request);
+                    break;
+                case Command.Type.Pause:
+                    response = Pause(request);
+                    break;
+                case Command.Type.Resume:
+                    response = Continue(request);
+                    break;
+                case Command.Type.ReadMemory:
+                    response = ReadMemory(request);
+                    break;
+                case Command.Type.DumpMemory:
+                    response = DumpMemory(request);
+                    break;
+                case Command.Type.WriteMemory:
+                    response = WriteMemory(request);
+                    break;
+                case Command.Type.Registers:
+                    response = GetRegisters(request);
+                    break;
+                case Command.Type.Modules:
+                    response = GetModules(request);
+                    break;
+                case Command.Type.Threads:
+                    response = GetThreads(request);
+                    break;
+                case Command.Type.Regions:
+                    response = GetRegions(request);
+                    break;
+                case Command.Type.Upload:
+                    response = UploadFile(request);
+                    break;
+                case Command.Type.Launch:
+                    response = LaunchFile(request);
+                    break;
+                //case Command.Type.LaunchDash:
+                //    response = LaunchFile(request, _DashPath);
+                //    break;
+                case Command.Type.Reboot:
+                    response = Reboot(request);
+                    break;
+                case Command.Type.Quit:
+                case Command.Type.Exit:
+                    _IsRunning = false;
+                    return;
+
+                case Command.Type.Question:
+                case Command.Type.Help:
+                    if (!_JsonMode)
+                    {
+                        PrintHelp();
+                        return;
+                    }
+                    else
+                    {
+                        response = GenericError(request, "Help command is not available in JSON mode.");
+                    }
+                    break;
+
+                default:
+                    break;
+            }
+
+            if (response == null)
+            {
+                response = GenericError(request, "Unknown command.");
+            }
+
+            HandleResponse(response);
+        }
+
+        [MemberNotNullWhen(true, nameof(_Xbox))]
+        private static bool XboxConnected()
+        {
+            return (_Xbox == null) ? false : true;
+        }
+
+        private static Command.Response GenericError(Command.Request request, string? message = null)
+        {
+            return new Command.Response(request.Type, false, message);
+        }
+
+        private static Command.Response GenericSuccess(Command.Request request, string? message = null)
+        {
+            return new Command.Response(request.Type, true, message);
+        }
+
+        private static Command.Response NotConnectedError(Command.Request request)
+        {
+            return GenericError(request, "Not connected to any Xbox console.");
+        }
+
+        private static Command.Response LoadSymbols(Command.Request request)
+        {
+            if (request.Payload is not Command.LoadSymbolsArgs args)
+            {
+                return GenericError(request, "PdbPath is required for loadsymbols command.");
+            }
+
+            if (!_SymbolManager.LoadPdb(args.PdbPath))
+            {
+                return GenericError(request, "Failed to load symbols.");
+            }
+
+            if (args.ImageBase.HasValue)
+                _SymbolManager.SetImageBase(args.ImageBase.Value);
+
+            return GenericSuccess(request, "Symbols loaded.");
+        }
+
+        static Command.Response Scan(Command.Request request)
+        {
+            var args = request.Payload as Command.ScanArgs ?? new Command.ScanArgs();
+
+            var availableXboxes = Xbox.Discover(args.TimeoutMs, _Logger);
             if (availableXboxes.Count == 0)
             {
-                WriteError(command, "No Xbox consoles found on the network.");
-                return;
+                return GenericError(request, "No Xbox consoles found on the network.");
             }
 
             var xboxList = availableXboxes.Select(x => new
@@ -373,57 +317,11 @@ namespace XboxDebugConsole
                 ip = x.Ip.ToString()
             }).ToArray();
 
-            var response = new
-            {
-                type = "result",
-                command = command.GetDescription(),
-                success = true,
-                count = availableXboxes.Count,
-                xboxes = xboxList
-            };
-
-            WriteResult(response);
+            return new Command.Response(request.Type, true, null, xboxList);
         }
 
-        static void Connect(Command command, string? ipAddress = null, string? xboxName = null, int timeoutMs = 5000)
+        private static bool ConnectRaw(string ipAddress)
         {
-            if (_Xbox != null)
-            {
-                WriteError(command, "Already connected to an Xbox. Please disconnect first.");
-                return;
-            }
-
-            if (ipAddress == null)
-            {
-                var availableXboxes = Xbox.Discover(timeoutMs, _Logger);
-
-                if (availableXboxes.Count == 0)
-                {
-                    WriteError(command, "No Xbox consoles found on the network.");
-                }
-
-                if (xboxName == null)
-                {
-                    ipAddress = availableXboxes[0].Ip.ToString();
-                }
-                else
-                {
-                    for (int i = 0; i < availableXboxes.Count; i++)
-                    {
-                        if (availableXboxes[i].Name.Equals(xboxName, StringComparison.OrdinalIgnoreCase))
-                        {
-                            ipAddress = availableXboxes[i].Ip.ToString();
-                            break;
-                        }
-                    }
-                    if (ipAddress == null)
-                    {
-                        WriteError(command, $"Xbox with name '{xboxName}' not found on the network.");
-                        return;
-                    }
-                }
-            }
-
             try
             {
                 _Xbox = new Xbox(_Logger);
@@ -431,50 +329,87 @@ namespace XboxDebugConsole
 
                 _Xbox.NotificationReceived += (sender, e) =>
                 {
-                    WriteNotification(e.Message);
-
+                    HandleNotification(e.Message);
                 };
             }
-            catch (Exception ex)
+            catch
             {
                 Cleanup();
-                WriteError(Command.Connect, "Failed to connect to Xbox: " + ex.Message);
-                return;
-            }
-
-            WriteSuccess(Command.Connect, $"Successfully connected to Xbox at {ipAddress}.");
-        }
-
-        [MemberNotNullWhen(true, nameof(_Xbox))]
-        static bool IsConnected(Command command)
-        {
-            if (_Xbox == null)
-            {
-                WriteError(command, "Not connected to any Xbox.");
                 return false;
             }
+
             return true;
         }
 
-        static void Disconnect(Command command)
+        private static Command.Response Connect(Command.Request request)
         {
-            if (!IsConnected(command))
+            if (_Xbox != null)
             {
-                return;
+                return GenericError(request, "Already connected to an Xbox. Please disconnect first.");
+            }
+
+            var args = request.Payload as Command.ConnectArgs ?? new Command.ConnectArgs();
+            string? ipAddress = args.Ip;
+
+            if (ipAddress == null)
+            {
+                //var timeout = args.TimeoutMs;
+                var availableXboxes = Xbox.Discover(args.TimeoutMs, _Logger);
+
+                if (availableXboxes.Count == 0)
+                {
+                    return GenericError(request, "No Xbox consoles found on the network.");
+                }
+
+                if (args.Name == null)
+                {
+                    ipAddress = availableXboxes[0].Ip.ToString();
+                }
+                else
+                {
+                    for (int i = 0; i < availableXboxes.Count; i++)
+                    {
+                        if (availableXboxes[i].Name.Equals(args.Name, StringComparison.OrdinalIgnoreCase))
+                        {
+                            ipAddress = availableXboxes[i].Ip.ToString();
+                            break;
+                        }
+                    }
+                    if (ipAddress == null)
+                    {
+                        return GenericError(request, $"Xbox with name '{args.Name}' not found on the network.");
+                    }
+                }
+            }
+
+            if (!ConnectRaw(ipAddress))
+            {
+                return GenericError(request, $"Failed to connect to Xbox at {ipAddress}.");
+            }
+
+            return GenericSuccess(request, $"Successfully connected to Xbox at {ipAddress}.");
+        }
+
+        private static Command.Response Disconnect(Command.Request request)
+        {
+            if (!XboxConnected())
+            {
+                return NotConnectedError(request);
             }
 
             Cleanup();
 
-            WriteSuccess(command, "Disconnected from Xbox.");
+            return GenericSuccess(request, "Disconnected from Xbox.");
         }
 
-        static void Reboot(Command command, bool autoReconnect = true, int timeoutMs = 10000)
+        private static Command.Response Reboot(Command.Request request)
         {
-            if (!IsConnected(command))
+            if (!XboxConnected())
             {
-                return;
+                return NotConnectedError(request);
             }
 
+            var args = request.Payload as Command.RebootArgs ?? new Command.RebootArgs();
             var connectedIp = _Xbox.PreviousConnectionAddress;
 
             try 
@@ -488,13 +423,13 @@ namespace XboxDebugConsole
 
             Cleanup();
 
-            if (!autoReconnect)
+            if (!args.AutoReconnect)
             {
-                WriteSuccess(command, "Xbox rebooted. Please reconnect when it's back online.");
-                return;
+                return GenericSuccess(request, "Xbox rebooted. Please reconnect when it's back online.");
             }
 
             List<XboxConnectionInformation> availableXboxes = new List<XboxConnectionInformation>();
+            var timeoutMs = args.TimeoutMs;
 
             while (timeoutMs > 0)
             {
@@ -506,220 +441,345 @@ namespace XboxDebugConsole
                     var xbox = availableXboxes[i];
                     if (xbox.Ip.Equals(connectedIp))
                     {
-                        Connect(command, xbox.Ip.ToString());
-                        return;
+                        if (ConnectRaw(xbox.Ip.ToString()))
+                        {
+                            return GenericSuccess(request, "Xbox rebooted and reconnected successfully.");
+                        }
                     }
                 }
             }
 
-            WriteError(command, "Rebooted Xbox found but failed to reconnect.");
+            return GenericError(request, "Rebooted Xbox found but failed to reconnect within the timeout period.");
         }
 
-        static void SetBreakpoint(Command command, string addressStr)
+        private static Command.Response SetBreakpoints(Command.Request request)
         {
-            if (!IsConnected(command))
+            if (!XboxConnected())
             {
-                return;
+                return NotConnectedError(request);
             }
 
-            uint address = ParseHex(addressStr);
-            byte[] ogBytes = _Xbox.Memory.ReadBytes(address, 1);
-            var response = _Xbox.DebugMonitor.DmSetBreakpoint(address);
-
-            if (response.Success)
+            if (request.Payload is not Command.BreakpointArgs args)
             {
-                _Breakpoints[address] = ogBytes;
-                WriteSuccess(command, $"Breakpoint set at 0x{address:X8}");
+                return GenericError(request, "address or file/line is required for setbreakpoint command.");
+            }
+
+            var results = new List<object>();
+
+            foreach (var bp in args.Breakpoints)
+            {
+                uint? address = bp.Address;
+                string file = bp.File;
+                int line = bp.Line;
+
+                if (address == null)
+                {
+                    if (string.IsNullOrEmpty(file) || (line < 0) ||
+                        !_SymbolManager.Initialized() ||
+                        ((address = _SymbolManager.GetAddressForLine(file, line)) == null))
+                    {
+                        results.Add(new 
+                        {
+                            success = false,
+                            address = 0,
+                            file = file ?? "",
+                            line = (line > 0) ? line : 0,
+                            message = "Address is required if symbols are not loaded."
+                        });
+                        continue;
+                    }
+                }
+
+                bool result = false;
+                string? errMsg = null;
+
+                try
+                {
+                    byte[] ogBytes = _Xbox.Memory.ReadBytes(address.Value, 1);
+                    var response = _Xbox.DebugMonitor.DmSetBreakpoint(address.Value);
+
+                    if (response.Success)
+                    {
+                        _Breakpoints[address.Value] = ogBytes;
+                        result = true;
+                    }
+
+                    errMsg = response.Message;
+                }
+                catch (Exception ex)
+                {
+                    errMsg = ex.Message;
+                }
+
+                results.Add(new
+                {
+                    success = result,
+                    address = address ?? 0,
+                    file = file ?? "",
+                    line = (line > 0) ? line : 0,
+                    message = errMsg
+                });
+            }
+
+            bool anySuccess = results.Any(r => ((bool)r.GetType().GetProperty("success")?.GetValue(r) == true));
+
+            if (anySuccess)
+            {
+                return new Command.Response(request.Type, true, null, results);
             }
             else
             {
-                WriteError(command, $"Failed to set breakpoint at 0x{address:X8}: {response.Message}");
+                return GenericError(request, "No valid breakpoints provided.");
             }
         }
 
-        static void DeleteBreakpoint(Command command, string addressStr)
+        private static Command.Response DeleteBreakpoints(Command.Request request)
         {
-            if (!IsConnected(command))
+            if (!XboxConnected())
             {
-                return;
+                return NotConnectedError(request);
             }
 
-            uint address = ParseHex(addressStr);
-
-            if (_Breakpoints.ContainsKey(address))
+            if (request.Payload is not Command.BreakpointArgs args)
             {
-                var response = _Xbox.DebugMonitor.DmRemoveBreakpoint(address);
+                return GenericError(request, "address or file/line is required for deletebreakpoint command.");
+            }
 
+            var addressList = new List<uint>();
+
+            foreach (var bp in args.Breakpoints)
+            {
+                uint? address = bp.Address;
+                string file = bp.File;
+                int line = bp.Line;
+
+                if (address == null)
+                {
+                    if (string.IsNullOrEmpty(file) || (line < 0) ||
+                        !_SymbolManager.Initialized() ||
+                        ((address = _SymbolManager.GetAddressForLine(file, line)) == null))
+                    {
+                        continue;
+                    }
+                }
+
+                addressList.Add(address.Value);
+            }
+
+            foreach (var address in addressList)
+            {
+                if (!_Breakpoints.ContainsKey(address))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    _Xbox.DebugMonitor.DmRemoveBreakpoint(address);
+                }
+                catch
+                {
+                }
+
+                _Breakpoints.Remove(address);
+            }
+
+            return GenericSuccess(request, "Breakpoints deleted.");
+        }
+
+        private static Command.Response Pause(Command.Request request)
+        {
+            if (!XboxConnected())
+            {
+                return NotConnectedError(request);
+            }
+
+            try
+            {
+                var response = _Xbox.DebugMonitor.DmStop();
                 if (response.Success)
                 {
-                    _Breakpoints.Remove(address);
-
+                    return GenericError(request, response.Message);
                 }
                 else
                 {
-                    WriteError(command, $"Failed to remove breakpoint at 0x{address:X8}: {response.Message}");
-                    return;
+                    return GenericSuccess(request, "Execution paused.");
                 }
             }
-
-            WriteSuccess(Command.DeleteBreakpoint, $"Breakpoint removed at 0x{address:X8}");
-        }
-
-        static void Pause(Command command)
-        {
-            if (!IsConnected(Command.Pause))
+            catch (Exception ex)
             {
-                return;
-            }
-
-            var response = _Xbox.DebugMonitor.DmStop();
-            if (response.Success)
-            {
-                WriteSuccess(command, "Execution paused.");
-            }
-            else
-            {
-                WriteError(command, "Failed to pause execution: " + response.Message);
+                return GenericError(request, ex.Message);
             }
         }
 
-        static void Continue(Command command)
+        private static Command.Response Continue(Command.Request request)
         {
-            if (!IsConnected(command))
+            if (!XboxConnected())
             {
-                return;
+                return NotConnectedError(request);
             }
 
-            var response = _Xbox.DebugMonitor.DmGo();
-
-            if (response.Success)
+            try
             {
-                WriteSuccess(command, "Execution continued.");
+                var response = _Xbox.DebugMonitor.DmGo();
+                if (response.Success)
+                {
+                    return GenericSuccess(request, "Execution continued.");
+                }
+                else
+                {
+                    return GenericError(request, response.Message);
+                }
             }
-            else
+            catch (Exception ex)
             {
-                WriteError(command, "Failed to continue execution: " + response.Message);
+                return GenericError(request, ex.Message);
             }
         }
 
-        static void ReadMemory(Command command, string addressStr, int readLen)
+        private static Command.Response ReadMemory(Command.Request request)
         {
-            if (!IsConnected(command))
+            if (!XboxConnected())
             {
-                return;
+                return NotConnectedError(request);
             }
 
-            uint address = ParseHex(addressStr);
-            byte[] data = _Xbox.Memory.ReadBytes(address, readLen);
-            string hexData = BitConverter.ToString(data).Replace("-", " ");
-
-            var response = new
+            if (request.Payload is not MemoryReadArgs args)
             {
-                type = "result",
-                command = command.GetDescription(),
-                success = true,
-                address = $"0x{address:X8}",
-                length = readLen,
-                data = hexData
-            };
-
-            WriteResult(response);
-        }
-
-        static void WriteMemory(Command command, string addressStr, string hexStr)
-        {
-            if (!IsConnected(command))
-            {
-                return;
+                return GenericError(request, "address and length are required for read command.");
             }
 
-            uint address = ParseHex(addressStr);
-            string[] hexBytes = hexStr.Split(
-                new[] { ' ', ',' }, StringSplitOptions.RemoveEmptyEntries);
-            byte[] data = hexBytes.Select(
-                h => Convert.ToByte(h.Replace("0x", ""), 16)).ToArray();
-
-            _Xbox.Memory.WriteBytes(address, data);
-
-            WriteSuccess(command, $"Wrote {data.Length} bytes to 0x{address:X8}");
+            try
+            {
+                byte[] data = _Xbox.Memory.ReadBytes(args.Address, args.Length);
+                var payload = new
+                {
+                    address = $"0x{args.Address:X8}",
+                    length = data.Length,
+                    data = BitConverter.ToString(data).Replace("-", " ")
+                };
+                return new Command.Response(request.Type, true, null, payload);
+            }
+            catch (Exception ex)
+            {
+                return GenericError(request, ex.Message);
+            }
         }
 
-        static void DumpMemory(Command command, string addressStr, int length, string filePath)
+        private static Command.Response WriteMemory(Command.Request request)
         {
-            if (!IsConnected(command))
+            if (!XboxConnected())
             {
-                return;
+                return NotConnectedError(request);
             }
 
-            uint address = ParseHex(addressStr);
-            byte[] data = _Xbox.Memory.ReadBytes(address, length);
+            if (request.Payload is not MemoryWriteArgs args)
+            {
+                return GenericError(request, "address and data are required for write command.");
+            }
 
-            File.WriteAllBytes(filePath, data);
+            try
+            {
+                _Xbox.Memory.WriteBytes(args.Address, args.Data);
+            }
+            catch (Exception ex)
+            {
+                return GenericError(request, ex.Message);
+            }
 
-            WriteSuccess(command, $"Dumped {length} bytes from 0x{address:X8} to {filePath}");
+            return GenericSuccess(request, $"Wrote {args.Data.Length} bytes to 0x{args.Address:X8}");
         }
 
-        static void GetRegisters(Command command, int threadId)
+        private static Command.Response DumpMemory(Command.Request request)
         {
-            if (!IsConnected(command))
+            if (!XboxConnected())
             {
-                return;
+                return NotConnectedError(request);
+            }
+
+            if (request.Payload is not MemoryDumpArgs args)
+            {
+                return GenericError(request, "address, length and localPath are required for dump command.");
+            }
+
+            try
+            {
+                byte[] data = _Xbox.Memory.ReadBytes(args.Address, args.Length);
+                File.WriteAllBytes(args.LocalPath, data);
+            }
+            catch (Exception ex)
+            {
+                return GenericError(request, ex.Message);
+            }
+
+            return GenericSuccess(request, $"Dumped {args.Length} bytes from 0x{args.Address:X8} to {args.LocalPath}");
+        }
+
+        private static Command.Response GetRegisters(Command.Request request)
+        {
+            if (!XboxConnected())
+            {
+                return NotConnectedError(request);
             }
 
             var threads = _Xbox.Process.Threads;
             if (threads.Count == 0)
             {
-                WriteError(command, "No threads found in the process.");
-                return;
+                return GenericError(request, "No threads found in the process.");
             }
 
-            var thread = (threadId != 0)
-                ? threads.FirstOrDefault(t => t.Id == threadId)
+            if (request.Payload is not Command.ThreadArgs args)
+            {
+                return GenericError(request, "threadId is required for registers command.");
+            }
+
+            var thread = (args.ThreadId != 0)
+                ? threads.FirstOrDefault(t => t.Id == args.ThreadId)
                 : threads[0];
 
             if (thread == null)
             {
-                WriteError(command, $"Thread not found.");
-                return;
+                return GenericError(request, $"Thread with ID {args.ThreadId} not found.");
             }
 
-            var context = _Xbox.DebugMonitor.DmGetThreadContext(thread.Id, ContextFlags.Full);
-            var response = new
+            try
             {
-                type = "result",
-                command = command.GetDescription(),
-                success = true,
-                threadId = thread.Id,
-                registers = new
+                var context = _Xbox.DebugMonitor.DmGetThreadContext(thread.Id, ContextFlags.Full);
+                var result = new
                 {
-                    EAX = $"0x{context.Eax:X8}",
-                    EBX = $"0x{context.Ebx:X8}",
-                    ECX = $"0x{context.Ecx:X8}",
-                    EDX = $"0x{context.Edx:X8}",
-                    ESI = $"0x{context.Esi:X8}",
-                    EDI = $"0x{context.Edi:X8}",
-                    EBP = $"0x{context.Ebp:X8}",
-                    ESP = $"0x{context.Esp:X8}",
-                    EIP = $"0x{context.Eip:X8}",
-                    EFlags = $"0x{context.EFlags:X8}",
-                    CS = $"0x{context.SegCs:X8}",
-                    SS = $"0x{context.SegSs:X8}"
-                }
-            };
-
-            WriteResult(response);
+                    threadId = thread.Id,
+                    registers = new
+                    {
+                        EAX = $"0x{context.Eax:X8}",
+                        EBX = $"0x{context.Ebx:X8}",
+                        ECX = $"0x{context.Ecx:X8}",
+                        EDX = $"0x{context.Edx:X8}",
+                        ESI = $"0x{context.Esi:X8}",
+                        EDI = $"0x{context.Edi:X8}",
+                        EBP = $"0x{context.Ebp:X8}",
+                        ESP = $"0x{context.Esp:X8}",
+                        EIP = $"0x{context.Eip:X8}",
+                        EFlags = $"0x{context.EFlags:X8}",
+                        CS = $"0x{context.SegCs:X8}",
+                        SS = $"0x{context.SegSs:X8}"
+                    }
+                };
+                return new Command.Response(request.Type, true, null, result);
+            }
+            catch (Exception ex)
+            {
+                return GenericError(request, ex.Message);
+            }
         }
 
-        static void GetThreads(Command command)
+        private static Command.Response GetThreads(Command.Request request)
         {
-            if (!IsConnected(command))
+            if (!XboxConnected())
             {
-                return;
+                return NotConnectedError(request);
             }
 
-            var threads = _Xbox.Process.Threads;
-
-            var threadList = threads.Select(t => new
+            var threadList = _Xbox.Process.Threads.Select(t => new
             {
                 id = t.Id,
                 suspendCount = t.Suspend,
@@ -731,28 +791,22 @@ namespace XboxDebugConsole
                 creationTime = t.CreationTime
             }).ToArray();
 
-            var response = new
+            if (threadList.Length == 0)
             {
-                type = "result",
-                command = command.GetDescription(),
-                success = true,
-                count = threads.Count,
-                threads = threadList
-            };
-
-            WriteResult(response);
-        }
-
-        static void GetModules(Command command)
-        {
-            if (!IsConnected(command))
-            {
-                return;
+                return GenericError(request, "No threads found in the process.");
             }
 
-            var modules = _Xbox.Process.Modules;
+            return new Command.Response(request.Type, true, null, threadList);
+        }
 
-            var moduleList = modules.Select(m => new
+        private static Command.Response GetModules(Command.Request request)
+        {
+            if (!XboxConnected())
+            {
+                return NotConnectedError(request);
+            }
+
+            var moduleList = _Xbox.Process.Modules.Select(m => new
             {
                 name = m.Name,
                 baseAddress = $"0x{m.BaseAddress:X8}",
@@ -771,83 +825,87 @@ namespace XboxDebugConsole
                 }).ToArray()
             }).ToArray();
 
-            var response = new
+            if (moduleList.Length == 0)
             {
-                type = "result",
-                command = command.GetDescription(),
-                success = true,
-                count = modules.Count,
-                modules = moduleList
-            };
-
-            WriteResult(response);
-        }
-
-        static void GetRegions(Command command)
-        {
-            if (!IsConnected(command))
-            {
-                return;
+                return GenericError(request, "No modules found in the process.");
             }
 
-            var regions = _Xbox.Memory.Regions;
+            return new Command.Response(request.Type, true, null, moduleList);
+        }
 
-            var regionList = regions.Select(r => new
+        private static Command.Response GetRegions(Command.Request request)
+        {
+            if (!XboxConnected())
+            {
+                return NotConnectedError(request);
+            }
+
+            var regionList = _Xbox.Memory.Regions.Select(r => new
             {
                 baseAddress = $"0x{r.Address:X8}",
                 size = r.Size,
-                //protection  = $"0x{r.Protect:X8}"
                 protection = r.Protect.ToString()
             }).ToArray();
 
-            var response = new
+            if (regionList.Length == 0)
             {
-                type = "result",
-                command = command.GetDescription(),
-                success = true,
-                count = regions.Count,
-                regions = regionList
-            };
-
-            WriteResult(response);
-        }
-
-        static void UploadFile(Command command, string localPath, string remotePath)
-        {
-            if (!IsConnected(command))
-            {
-                return;
+                return GenericError(request, "No memory regions found.");
             }
 
-            if (!File.Exists(localPath))
-            {
-                WriteError(command, $"Local file not found: {localPath}");
-                return;
-            }
-
-            byte[] fileBytes = File.ReadAllBytes(localPath);
-            _Xbox.FileSystem.WriteFile(remotePath, fileBytes);
-
-            WriteSuccess(command, $"Uploaded file to {remotePath}");
+            return new Command.Response(request.Type, true, null, regionList);
         }
 
-        static void LaunchFile(Command command, string remotePath)
+        private static Command.Response UploadFile(Command.Request request)
         {
-            if (!IsConnected(command))
+            if (!XboxConnected())
             {
-                return;
+                return NotConnectedError(request);
+            }
+
+            if (request.Payload is not Command.UploadArgs args)
+            {
+                return GenericError(request, "localPath and remotePath are required for upload command.");
+            }
+
+            if (!File.Exists(args.LocalPath))
+            {
+                return GenericError(request, $"Local file not found: {args.LocalPath}");
+            }
+
+            try
+            {
+                byte[] fileBytes = File.ReadAllBytes(args.LocalPath);
+                _Xbox.FileSystem.WriteFile(args.RemotePath, fileBytes);
+            }
+            catch (Exception ex)
+            {
+                return GenericError(request, ex.Message);
+            }
+
+            return GenericSuccess(request, $"Uploaded {args.LocalPath} to {args.RemotePath}");
+        }
+
+        private static Command.Response LaunchFile(Command.Request request)
+        {
+            if (!XboxConnected())
+            {
+                return NotConnectedError(request);
+            }
+
+            if (request.Payload is not Command.LaunchArgs args)
+            {
+                return GenericError(request, "remotePath is required for launch command.");
             }
 
             string message;
 
             try
             {
-                var response = _Xbox.CommandSession.SendCommand($"magicboot title=\"{remotePath}\"");
+                var response = _Xbox.CommandSession.SendCommand($"magicboot title=\"{args.RemotePath}\"");
 
                 if (response.Success)
                 {
-                    WriteSuccess(command, $"Launched {remotePath}");
-                    return;
+                    return GenericSuccess(request, $"Launched {args.RemotePath} successfully."); 
                 }
                 else 
                 {
@@ -861,116 +919,85 @@ namespace XboxDebugConsole
 
             if (message.Contains("timed out"))
             {
-                Reboot(Command.NoOutput, autoReconnect: false);
-                Disconnect(Command.NoOutput);
-                WriteError(command, $"Failed to launch {remotePath}: Console rebooted, please reconnect and try again.");
+                Reboot(new Command.Request(Command.Type.Reboot, null));
+                Disconnect(new Command.Request(Command.Type.Disconnect, null));
+                return GenericError(request, $"Failed to launch {args.RemotePath}: Console rebooted, please reconnect and try again.");
             }
             else
             {
-                WriteError(command, $"Failed to launch {remotePath}: {message}");
+                return GenericError(request, message);
+            }
+        }
+
+        private static void WriteWrapped(string text, int indent, int maxWidth)
+        {
+            var words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            var line = new StringBuilder();
+
+            foreach (var word in words)
+            {
+                if (indent + line.Length + word.Length + 1 > maxWidth)
+                {
+                    Console.WriteLine(new string(' ', indent) + line.ToString().TrimEnd());
+                    line.Clear();
+                }
+
+                line.Append(word).Append(' ');
+            }
+
+            if (line.Length > 0)
+            {
+                Console.WriteLine(new string(' ', indent) + line.ToString().TrimEnd());
             }
         }
 
         static void PrintHelp()
         {
+            ConsoleColor consoleColor = Console.ForegroundColor;
             Console.ForegroundColor = ConsoleColor.Gray;
-            Console.Write("Available commands:\n" +
-                "  scan timeoutMs=<MILLISECONDS>\n" +
-                "      - Scans the local network for Xbox consoles and displays \n" +
-                "        their IP addresses and names. timeoutMs is optional and\n" +
-                "        specifies the maximum time in milliseconds to wait for\n" +
-                "        responses, default is 5000.\n" +
-                "\n" +
-                "  connect\n" +
-                "      - Connects to the first Xbox console found on the local network.\n" +
-                "\n" +
-                "  connect name=<CONSOLE_NAME>\n" +
-                "      - Connects to the Xbox console with the specified name.\n" +
-                "\n" +
-                "  connect ip=<IP_ADDRESS>\n" +
-                "      - Connects to the Xbox console at the specified IP address.\n" +
-                "\n" +
-                "  disconnect\n" +
-                "      - Disconnects from the currently connected Xbox console.\n" +
-                "\n" +
-                "  reboot autoReconnect=<BOOL> timeoutMs=<MILLISECONDS>\n" +
-                "      - Cold reboot the connected Xbox console. autoReconnect is\n" +
-                "        optional, if true, the console will automatically attempt\n" +
-                "        to reconnect after  rebooting. timeoutMs is optional and\n" +
-                "        specifies the maximum time in milliseconds to wait for \n" +
-                "        the console to reconnect, default is 5000.\n" +
-                "\n" +
-                "  mute\n" +
-                "      - Mute console notifications. This will prevent any notifications\n" +
-                "        from being displayed until 'unmute' is entered.\n" +
-                "\n" +
-                "  unmute\n" +
-                "      - Unmute console notifications. This will allow notifications\n" +
-                "        to be displayed again after being muted.\n" +
+            Console.WriteLine("==== Available commands ====");
+            var consoleLimit = 64;
 
-                "  upload localPath=<PATH> remotePath=<PATH>\n" +
-                "      - Upload a file from the local machine to the Xbox console.\n" +
-                "\n" +
-                "  launch remotePath=<PATH>\n" +
-                "      - Launch an application on the Xbox console from the specified\n" +
-                "        remote file path.\n" +
-                "\n" +
-                "  launchdash\n" +
-                "      - Launch the Xbox dashboard.\n" +
-                "\n" +
-                "  setbreak address=<HEXADDRESS>\n" +
-                "      - Set a breakpoint at the specified memory address.\n" +
-                "\n" +
-                "  deletebreak address=<HEXADDRESS>\n" +
-                "      - Clear a breakpoint at the specified memory address.\n" +
-                "\n" +
-                "  listbreaks\n" +
-                "      - List all currently set breakpoints.\n" +
-                "\n" +
-                "  pause\n" +
-                "      - Pause execution of the currently running Xbox application.\n" +
-                "\n" +
-                "  continue\n" +
-                "      - Continue execution of the currently paused Xbox application.\n" +
-                "\n" +
-                "  read address=<HEXADDRESS> length=<LENGTH>\n" +
-                "      - Read a block of memory of the specified length in bytes \n" +
-                "        from the specified memory address.\n" +
-                "\n" +
-                "  dump address=<HEXADDRESS> lenght=<LENGTH> localPath=<PATH>\n" +
-                "      - Dump a block of memory of the specified length in bytes \n" +
-                "        from the specified memory address to a file.\n" +
-                "\n" +
-                "  write address=<HEXADDRESS> data=<BYTES>\n" +
-                "      - Write a block of data to the specified memory address. \n" +
-                "        The data should be provided as a hexadecimal string.\n" +
-                "\n" +
-                "  modules\n" +
-                "      - List all loaded modules on the Xbox console, including\n" +
-                "        their base addresses and sizes.\n" +
-                "\n" +
-                "  threads\n" +
-                "      - List all active threads on the Xbox console, including \n" +
-                "        their thread IDs and statuses.\n" +
-                "\n" +
-                "  registers threadId=<THREAD_ID>\n" +
-                "      - Display the CPU registers for the specified thread ID. \n" +
-                "        If no thread ID is provided, the first found will be used.\n" +
-                "\n" +
-                "  regions\n" +
-                "      - List all memory regions on the Xbox console, including their \n" +
-                "        base addresses, sizes, and permissions.\n" +
-                "\n" +
-                "  exit\n" +
-                "  quit\n" +
-                "      - Exit the XboxDebugConsole application.\n" +
-                "\n" +
-                "  ?\n" +
-                "  help\n" +
-                "      - Display this message.\n" +
-                "\n"
-            );
-            Console.ResetColor();
+            foreach (var desc in Command.HelpCatalog.Descriptions)
+            {
+                if (desc == null)
+                {
+                    continue;
+                }
+                else if (string.IsNullOrEmpty(desc.Type))
+                {
+                    continue;
+                }
+
+                Console.ForegroundColor = ConsoleColor.Yellow;
+                WriteWrapped(desc.Type, 2, consoleLimit);
+
+                Console.ForegroundColor = ConsoleColor.Gray;
+                WriteWrapped(desc.Description, 4, consoleLimit);
+
+                if (desc.Arguments != null)
+                {
+                    WriteWrapped("Params:", 4, consoleLimit);
+
+                    foreach (var arg in desc.Arguments)
+                    {
+                        Console.ForegroundColor = ConsoleColor.Yellow;
+                        WriteWrapped(arg.Arg, 6, consoleLimit);
+                        Console.ForegroundColor = ConsoleColor.Gray;
+                        WriteWrapped(arg.Description, 8, consoleLimit);
+                    }
+                }
+                Console.Write("\n");
+            }
+
+            Console.ForegroundColor = ConsoleColor.Gray;
+            Console.WriteLine("==== Usage ====");
+            Console.ForegroundColor = ConsoleColor.Yellow;
+            WriteWrapped("scan timeoutMs=5000", 2, consoleLimit);
+            WriteWrapped("connect ip=192.168.0.1", 2, consoleLimit);
+            Console.Write("\n");
+
+            Console.ForegroundColor = consoleColor;
         }
 
         static uint ParseHex(string hex)
@@ -1032,6 +1059,10 @@ namespace XboxDebugConsole
                         index++;
                     }
                 }
+                else if (value is Command.Type cmdtype)
+                {
+                    Console.WriteLine(cmdtype.GetDescription());
+                }
                 else
                 {
                     Console.WriteLine();
@@ -1040,78 +1071,18 @@ namespace XboxDebugConsole
             }
         }
 
-        static void WriteError(Command command, string errorStr)
+        static void HandleNotification(string messageStr)
         {
-            if (command == Command.NoOutput)
+            if (_NotificationsMuted)
             {
                 return;
             }
 
-            var response = new
+            _XboxNotifications.Enqueue(new XboxNotification
             {
-                type = "result",
-                command = command.GetDescription(),
-                success = false,
-                message = errorStr
-            };
-
-            if (_JsonMode)
-            {
-                Console.WriteLine(JsonConvert.SerializeObject(response));
-            }
-            else
-            {
-                Console.ForegroundColor = ConsoleColor.Red;
-                PrintObject(response);
-                Console.ResetColor();
-            }
-        }
-
-        static void WriteSuccess(Command command, string successStr)
-        {
-            if (command == Command.NoOutput)
-            {
-                return;
-            }
-
-            var response = new
-            {
-                type = "result",
-                command = command.GetDescription(),
-                success = true,
-                message = successStr
-            };
-
-            if (_JsonMode)
-            {
-                Console.WriteLine(JsonConvert.SerializeObject(response));
-            }
-            else
-            {
-                Console.ForegroundColor = ConsoleColor.Green;
-                PrintObject(response);
-                Console.ResetColor();
-            }
-        }
-
-        static void WriteResult(object resultObj)
-        {
-            var commandStr = (resultObj.GetType().GetProperty("command")?.GetValue(resultObj)?.ToString()) ?? "unknown";
-            if (commandStr == Command.NoOutput.GetDescription())
-            {
-                return;
-            }
-
-            if (_JsonMode)
-            {
-                Console.WriteLine(JsonConvert.SerializeObject(resultObj));
-            }
-            else
-            {
-                Console.ForegroundColor = ConsoleColor.Green;
-                PrintObject(resultObj);
-                Console.ResetColor();
-            }
+                Timestamp = DateTime.UtcNow.ToString(),
+                Message = messageStr
+            });
         }
     }
 }
