@@ -28,7 +28,7 @@ Commands:
 - ```connect``` Connects to an Xbox console by IP address, name, or first available.
     - ```ip``` Optional. IP address of the console to connect to.
     - ```name```  Optional. Name of the console to connect to.
-      ```timeoutMs``` Optional. Time in milliseconds to wait for connection. Default is 5000.
+    - ```timeoutMs``` Optional. Time in milliseconds to wait for connection. Default is 5000.
 
 - ```disconnect``` Disconnects from the currently connected Xbox console.
 
