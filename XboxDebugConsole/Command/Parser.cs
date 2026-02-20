@@ -33,20 +33,21 @@ namespace XboxDebugConsole.Command
 
             RequestFactory.Args reqArgs = new RequestFactory.Args
             {
-                    Ip             = TryeParseString("ip", args),
-                    Name           = TryeParseString("name", args),
-                    LocalPath      = TryeParseString("localPath", args),
-                    RemotePath     = TryeParseString("remotePath", args),
-                    PdbPath        = TryeParseString("pdbPath", args),
-                    File           = TryeParseString("file", args),
-                    Address        = TryParseHex(TryeParseString("address", args)),
-                    ImageBase      = TryParseHex(TryeParseString("imageBase", args)),
-                    TimeoutMs      = TryParseInt("timeoutMs", args),
-                    Length         = TryParseInt("length", args),
-                    ThreadId       = TryParseInt("threadId", args),
-                    Data           = TryParseHexBytes(TryeParseString("data", args)),
-                    AutoReconnect  = TryParseBool("autoReconnect", args),
-                    Breakpoints    = null
+                Ip             = TryParseString("ip", args),
+                Name           = TryParseString("name", args),
+                LocalPath      = TryParseString("localPath", args),
+                RemotePath     = TryParseString("remotePath", args),
+                PdbPath        = TryParseString("pdbPath", args),
+                File           = TryParseString("file", args),
+                Address        = TryParseHex(TryParseString("address", args)),
+                ImageBase      = TryParseHex(TryParseString("imageBase", args)),
+                TimeoutMs      = TryParseInt("timeoutMs", args),
+                Length         = TryParseInt("length", args),
+                ThreadId       = TryParseInt("threadId", args),
+                Data           = TryParseHexBytes(TryParseString("data", args)),
+                AutoReconnect  = TryParseBool("autoReconnect", args),
+                Breakpoints    = null,
+                UpDown         = null
             };
 
             int? line = TryParseInt("line", args);
@@ -60,7 +61,14 @@ namespace XboxDebugConsole.Command
                         Line: line ?? -1)
                 });
             }
-                
+
+            if (reqArgs.LocalPath != null && reqArgs.RemotePath != null)
+            {
+                reqArgs.UpDown = new UploadDownloadArgs(new[] {
+                    new LocalRemotePair(reqArgs.LocalPath, reqArgs.RemotePath)
+                });
+            }
+
             if (!RequestFactory.Create(type.Value, reqArgs, out request, out error))
             {
                 if (error == null)
@@ -72,7 +80,7 @@ namespace XboxDebugConsole.Command
             return true;
         }
 
-        private static string? TryeParseString(string subcommand, string[] args)
+        private static string? TryParseString(string subcommand, string[] args)
         {
             for (int i = 0; i < args.Length; i++)
             {
@@ -94,7 +102,7 @@ namespace XboxDebugConsole.Command
 
         private static uint? TryParseUint(string subcommand, string[] args)
         {
-            string? strValue = TryeParseString(subcommand, args);
+            string? strValue = TryParseString(subcommand, args);
             if (strValue != null && uint.TryParse(strValue, out uint uintValue))
             {
                 return uintValue;
@@ -104,7 +112,7 @@ namespace XboxDebugConsole.Command
 
         private static int? TryParseInt(string subcommand, string[] args)
         {
-            string? strValue = TryeParseString(subcommand, args);
+            string? strValue = TryParseString(subcommand, args);
             if (strValue != null && int.TryParse(strValue, out int intValue))
             {
                 return intValue;
@@ -114,7 +122,7 @@ namespace XboxDebugConsole.Command
 
         private static bool? TryParseBool(string subcommand, string[] args)
         {
-            string? strValue = TryeParseString(subcommand, args);
+            string? strValue = TryParseString(subcommand, args);
             if (strValue != null && bool.TryParse(strValue, out bool boolValue))
             {
                 return boolValue;

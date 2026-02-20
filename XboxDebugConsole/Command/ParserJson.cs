@@ -49,7 +49,8 @@ namespace XboxDebugConsole.Command
                 ThreadId        = TryReadInt(jsonCmd["threadId"]),
                 Data            = TryReadBytes(jsonCmd["data"]),
                 AutoReconnect   = TryReadBool(jsonCmd["autoReconnect"]),
-                Breakpoints     = TryParseBreakpoints(jsonCmd)
+                Breakpoints     = TryParseBreakpoints(jsonCmd),
+                UpDown          = TryParseUpDown(jsonCmd)
             };
 
             if (!RequestFactory.Create(cmdType.Value, reqArgs, out request, out error))
@@ -78,6 +79,40 @@ namespace XboxDebugConsole.Command
 
             var imageBase = TryReadUInt(payload["imageBase"]);
             return Request.From(type, new LoadSymbolsArgs(pdbPath, imageBase));
+        }
+
+        private static UploadDownloadArgs? TryParseUpDown(JObject payload)
+        {
+            var pairs = new List<LocalRemotePair>();
+
+            if (payload["files"] is JArray array)
+            {
+                foreach (var token in array.OfType<JObject>())
+                {
+                    var local = token["localPath"]?.ToString();
+                    var remote = token["remotePath"]?.ToString();
+
+                    if (!string.IsNullOrWhiteSpace(local) && !string.IsNullOrWhiteSpace(remote))
+                    {
+                        pairs.Add(new LocalRemotePair(local, remote));
+                    }
+                }
+            }
+            else
+            {
+                var local = payload["localPath"]?.ToString();
+                var remote = payload["remotePath"]?.ToString();
+
+                if (!string.IsNullOrWhiteSpace(local) && !string.IsNullOrWhiteSpace(remote))
+                {
+                    pairs.Add(new LocalRemotePair(local, remote));
+                }
+            }
+
+            if (pairs.Count == 0)
+                return null;
+
+            return new UploadDownloadArgs(pairs);
         }
 
         private static BreakpointArgs? TryParseBreakpoints(JObject payload)

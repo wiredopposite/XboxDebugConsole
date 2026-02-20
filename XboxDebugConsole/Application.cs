@@ -1,21 +1,14 @@
 ﻿using Newtonsoft.Json;
-using Newtonsoft.Json.Linq;
-using System;
-using System.Text;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
-using System.IO;
-using System.IO.Ports;
-using System.Linq;
 using System.Net;
-using System.Reflection;
-
+using System.Text;
 using ViridiX.Linguist;
 using ViridiX.Linguist.Network;
 using ViridiX.Linguist.Process;
 using ViridiX.Mason.Logging;
+//using XboxDebugConsole.Command;
+//using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace XboxDebugConsole
 {
@@ -191,6 +184,9 @@ namespace XboxDebugConsole
                 //case Command.Type.Variables:
                 //    response = GetVariables(request);
                 //    break;
+                case Command.Type.Locals:
+                    response = GetLocals(request);
+                    break;
                 case Command.Type.SetBreakpoint:
                     response = SetBreakpoints(request);
                     break;
@@ -225,10 +221,10 @@ namespace XboxDebugConsole
                     response = GetRegions(request);
                     break;
                 case Command.Type.Upload:
-                    response = UploadFile(request);
+                    response = UploadFiles(request);
                     break;
                 case Command.Type.Launch:
-                    response = LaunchFile(request);
+                    response = Launch(request);
                     break;
                 //case Command.Type.LaunchDash:
                 //    response = LaunchFile(request, _DashPath);
@@ -292,6 +288,11 @@ namespace XboxDebugConsole
             return GenericError(request, "Not connected to any Xbox console.");
         }
 
+        private static Command.Response ArgsError(Command.Request request, string? message = null)
+        {
+            return GenericError(request, message ?? "Invalid or missing arguments for the command.");
+        }
+
         private static Command.Response LoadSymbols(Command.Request request)
         {
             if (request.Payload is not Command.LoadSymbolsArgs args)
@@ -318,8 +319,13 @@ namespace XboxDebugConsole
             {
                 return GenericError(request, "Symbols not loaded.");
             }
+            
+            if (request.Payload is not Command.FunctionArgs args)
+            {
+                return ArgsError(request);
+            }
 
-            var functions = _SymbolManager.GetFunctions()
+            var functions = _SymbolManager.GetFunctions(args.File)
                 .Select(f => new
                 {
                     name = f.Name,
@@ -337,12 +343,71 @@ namespace XboxDebugConsole
             return new Command.Response(request.Type, true, null, functions);
         }
 
-        //private static Command.Response GetVariables(Command.Request request)
-        //{
+        private static Command.Response GetLocals(Command.Request request)
+        {
+            if (!_SymbolManager.Initialized())
+            {
+                return GenericError(request, "Symbols not loaded.");
+            }
+            else if (!XboxConnected())
+            {
+                return NotConnectedError(request);
+            }
 
+            if (request.Payload is not Command.ThreadArgs args)
+            {
+                return ArgsError(request);
+            }
+
+            var threads = _Xbox.Process.Threads;
+            var thread = (args.ThreadId != 0)
+                ? threads.FirstOrDefault(t => t.Id == args.ThreadId)
+                : threads[0];
+
+            if (thread == null)
+            {
+                return GenericError(request, $"Thread with ID {args.ThreadId} not found.");
+            }
+
+            try
+            {
+                var context = _Xbox.DebugMonitor.DmGetThreadContext(thread.Id, ContextFlags.Full);
+                var locals = _SymbolManager.GetLocalsForAddress(context.Eip, context.Ebp)
+                    .Select(l => new
+                    {
+                        name = l.Name,
+                        type = l.TypeName,
+                        size = l.Size,
+                        address = l.Address.HasValue ? $"0x{l.Address:X8}" : null,
+                        isParamater = l.IsParameter,
+                        value = l.Address.HasValue ?
+                            BitConverter.ToString(_Xbox.Memory.ReadBytes(l.Address.Value, (int)l.Size)).Replace("-", " ") :
+                            ""
+                    })
+                    .ToArray();
+
+                return new Command.Response(request.Type, true, null, locals);
+            }
+            catch (Exception ex)
+            {
+                return GenericError(request, ex.Message);
+            }
+        }
+
+        //private static Command.Response GetLocation(Command.Request request)
+        //{
+        //    if (!_SymbolManager.Initialized())
+        //    {
+        //        return GenericError(request, "Symbols not loaded.");
+        //    }
+            
+        //    if (request.Payload is not Command.LocationArgs args)
+        //    {
+        //        return ArgsError(request);
+        //    }
         //}
 
-        static Command.Response Scan(Command.Request request)
+        private static Command.Response Scan(Command.Request request)
         {
             var args = request.Payload as Command.ScanArgs ?? new Command.ScanArgs();
 
@@ -782,7 +847,7 @@ namespace XboxDebugConsole
 
             if (request.Payload is not Command.ThreadArgs args)
             {
-                return GenericError(request, "threadId is required for registers command.");
+                return ArgsError(request, "threadId is required for registers command.");
             }
 
             var thread = (args.ThreadId != 0)
@@ -907,37 +972,164 @@ namespace XboxDebugConsole
             return new Command.Response(request.Type, true, null, regionList);
         }
 
-        private static Command.Response UploadFile(Command.Request request)
+        private static bool EnsureRemoteDirectories(string remotePath, out string? error)
+        {
+            error = null;
+
+            if (!XboxConnected())
+            {
+                error = "Not connected to any Xbox console.";
+                return false;
+            }
+
+            try
+            {
+                var directoryPath = Path.GetDirectoryName(remotePath.Replace('\\', '/'));
+
+                if (string.IsNullOrEmpty(directoryPath))
+                {
+                    error = "Empty directory path";
+                    return false;
+                }
+
+                var rootPath = Path.GetPathRoot(directoryPath);
+                if (string.IsNullOrEmpty(rootPath))
+                {
+                    error = "Invalid remote path.";
+                    return false;
+                }
+
+                var currentPath = rootPath.TrimEnd('\\');
+                var parts = directoryPath.Substring(
+                    rootPath.Length).Split(
+                        new[] { '/', '\\' }, 
+                        StringSplitOptions.RemoveEmptyEntries);
+
+                foreach (var part in parts)
+                {
+                    currentPath = $"{currentPath}\\{part}";
+                    _Xbox.FileSystem.CreateDirectory(currentPath);
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        private static bool UploadFileRaw(string localPath, string remotePath, out string? error)
+        {
+            if (!XboxConnected())
+            {
+                error = "Not connected to any Xbox console.";
+                return false;
+            }
+            else if (!File.Exists(localPath))
+            {
+                error = "Local file not found.";
+                return false;
+            }
+            else if (!EnsureRemoteDirectories(remotePath, out string? dirError))
+            {
+                error = dirError;
+                return false;
+            }
+
+            try
+            {
+                _Xbox.FileSystem.UploadFile(localPath, remotePath);
+                error = null;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = ex.Message;
+                return false;
+            }
+        }
+
+        private static Command.Response UploadFiles(Command.Request request)
         {
             if (!XboxConnected())
             {
                 return NotConnectedError(request);
             }
 
-            if (request.Payload is not Command.UploadArgs args)
+            if (request.Payload is not Command.UploadDownloadArgs args)
             {
-                return GenericError(request, "localPath and remotePath are required for upload command.");
+                return ArgsError(request);
             }
 
-            if (!File.Exists(args.LocalPath))
+            var results = new List<object>();
+
+            foreach (var path in args.Paths)
             {
-                return GenericError(request, $"Local file not found: {args.LocalPath}");
+                if (Directory.Exists(path.LocalPath))
+                {
+                    var allFiles = Directory.GetFiles(path.LocalPath, "*.*", SearchOption.AllDirectories);
+
+                    foreach (var file in allFiles)
+                    {
+                        var relativePath = Path.GetRelativePath(path.LocalPath, file);
+                        var remoteFilePath = Path.Combine(path.RemotePath, relativePath);
+
+                        if (!UploadFileRaw(file, remoteFilePath, out string? error))
+                        {
+                            results.Add(new
+                            {
+                                success = false,
+                                localPath = file,
+                                remotePath = remoteFilePath,
+                                message = error ?? "Failed to upload file."
+                            });
+                        }
+                        else
+                        {
+                            results.Add(new
+                            {
+                                success = true,
+                                localPath = file,
+                                remotePath = remoteFilePath,
+                                message = ""
+                            });
+                        }
+                    }
+                }
+                else if (!UploadFileRaw(path.LocalPath, path.RemotePath, out string? error))
+                {
+                    results.Add(new
+                    {
+                        success = false,
+                        localPath = path.LocalPath,
+                        remotePath = path.RemotePath,
+                        message = error ?? "Failed to upload file."
+                    });
+                }
+                else
+                {
+                    results.Add(new
+                    {
+                        success = true,
+                        localPath = path.LocalPath,
+                        remotePath = path.RemotePath,
+                        message = ""
+                    });
+                }
             }
 
-            try
+            if (results.Count == 0 ||
+                !results.Any(r => r.GetType().GetProperty("success")?.GetValue(r) is true))
             {
-                byte[] fileBytes = File.ReadAllBytes(args.LocalPath);
-                _Xbox.FileSystem.WriteFile(args.RemotePath, fileBytes);
-            }
-            catch (Exception ex)
-            {
-                return GenericError(request, ex.Message);
+                return GenericError(request, "No files uploaded.");
             }
 
-            return GenericSuccess(request, $"Uploaded {args.LocalPath} to {args.RemotePath}");
+            return new Command.Response(request.Type, true, null, results);
         }
 
-        private static Command.Response LaunchFile(Command.Request request)
+        private static Command.Response Launch(Command.Request request)
         {
             if (!XboxConnected())
             {

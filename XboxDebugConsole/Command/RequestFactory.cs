@@ -24,6 +24,7 @@ namespace XboxDebugConsole.Command
             public byte[]? Data { get; set; } = null;
             public bool? AutoReconnect { get; set; } = null;
             public BreakpointArgs? Breakpoints { get; set; } = null;
+            public UploadDownloadArgs? UpDown { get; set; } = null;
         }
 
         public static bool Create(Type type, Args args, out Request request, out string? error)
@@ -134,8 +135,8 @@ namespace XboxDebugConsole.Command
                     break;
 
                 case Type.Upload:
-                    if (string.IsNullOrWhiteSpace(args.LocalPath) ||
-                        string.IsNullOrWhiteSpace(args.RemotePath))
+                case Type.Download:
+                    if (args.UpDown == null)
                     {
                         error = "localPath and remotePath are required for Upload command.";
                         return false;
@@ -143,7 +144,7 @@ namespace XboxDebugConsole.Command
 
                     request = Request.From(
                         type,
-                        new UploadArgs(args.LocalPath, args.RemotePath));
+                        args.UpDown);
                     break;
 
                 case Type.Launch:

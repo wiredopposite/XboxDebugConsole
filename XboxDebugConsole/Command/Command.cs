@@ -27,6 +27,8 @@ namespace XboxDebugConsole.Command
         Unmute,
         [Description("loadsymbols")]
         LoadSymbols,
+        [Description("location")]
+        Location,
         [Description("functions")]
         Functions,
         [Description("locals")]
@@ -55,6 +57,8 @@ namespace XboxDebugConsole.Command
         Regions,
         [Description("upload")]
         Upload,
+        [Description("download")]
+        Download,
         [Description("launch")]
         Launch,
         //[Description("launchdash")]
@@ -91,9 +95,11 @@ namespace XboxDebugConsole.Command
     internal sealed record MemoryDumpArgs(uint Address, int Length, string LocalPath);
     
     internal sealed record MemoryWriteArgs(uint Address, byte[] Data);
-    
-    internal sealed record UploadArgs(string LocalPath, string RemotePath);
-    
+
+    internal sealed record LocalRemotePair(string LocalPath, string RemotePath);
+
+    internal sealed record UploadDownloadArgs(IReadOnlyList<LocalRemotePair> Paths);
+
     internal sealed record LaunchArgs(string RemotePath);
     
     internal sealed record ThreadArgs(int? ThreadId);
@@ -102,7 +108,7 @@ namespace XboxDebugConsole.Command
     
     internal sealed record BreakpointArgs(IReadOnlyList<BreakpointSpec> Breakpoints);
     
-    internal sealed record FunctionArgs(string? file = null);
+    internal sealed record FunctionArgs(string? File = null);
     
     internal sealed record LocalArgs(int? ThreadId);
     
