@@ -37,7 +37,7 @@ Commands:
     - ```address``` Required if no symbols loaded. Address to set a breakpoint at.
     - ```file``` Required if no address provided. Source file for setting a breakpoint.
     - ```line```  Required if no address provided. Line number in the source file for the breakpoint.
-- ```deletebreak``` Sets breakpoints at specified addresses or source lines.
+- ```deletebreak``` Deletes breakpoints at specified addresses or source lines.
     - ```address``` Required if no symbols loaded. Address to set a breakpoint at.
     - ```file``` Required if no address provided. Source file for setting a breakpoint.
     - ```line``` Required if no address provided. Line number in the source file for the breakpoint.

@@ -4,7 +4,6 @@ using System;
 using System.Text;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.CommandLine;
 using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
@@ -17,20 +16,18 @@ using ViridiX.Linguist;
 using ViridiX.Linguist.Network;
 using ViridiX.Linguist.Process;
 using ViridiX.Mason.Logging;
-using XboxDebugConsole.Command;
-using static System.Runtime.InteropServices.JavaScript.JSType;
 
 namespace XboxDebugConsole
 {
-    internal class XboxNotification
-    {
-        public string Type { get; set; } = "notification";
-        public string Timestamp { get; set; } = string.Empty;
-        public string Message { get; set; } = string.Empty;
-    }
-
     internal class Application
     {
+        internal class XboxNotification
+        {
+            public string Type { get; set; } = "notification";
+            public string Timestamp { get; set; } = string.Empty;
+            public string Message { get; set; } = string.Empty;
+        }
+
         private static Xbox? _Xbox = null;
         private static ILogger? _Logger = null;
         private static Dictionary<uint, byte[]> _Breakpoints = new Dictionary<uint, byte[]>();
@@ -81,13 +78,12 @@ namespace XboxDebugConsole
                 Console.Write(_Xbox != null ? "Xbox> " : "> ");
                 string? input = Console.ReadLine()?.Trim();
 
-                if (string.IsNullOrEmpty(input))
+                if (!string.IsNullOrEmpty(input))
                 {
-                    continue;
+                    ProcessInput(input);
+                    Console.Out.Flush();
                 }
 
-                ProcessInput(input);
-                Console.Out.Flush();
                 ProcessNotifications();
                 Console.Out.Flush();
             }
@@ -96,7 +92,6 @@ namespace XboxDebugConsole
         private static void AppTaskJson()
         {
             string? line;
-            //bool err = false;
 
             while (_IsRunning)
             {
@@ -104,9 +99,10 @@ namespace XboxDebugConsole
                 {
                     ProcessInput(line);
                     Console.Out.Flush();
-                    ProcessNotifications();
-                    Console.Out.Flush();
                 }
+
+                ProcessNotifications();
+                Console.Out.Flush();
             }
         }
 
@@ -149,7 +145,8 @@ namespace XboxDebugConsole
                 {
                     HandleResponse(
                         GenericError(
-                            new Command.Request(Command.Type.Unknown, null), error ?? "Invalid command payload."));
+                            new Command.Request(Command.Type.Unknown, null), 
+                            error ?? "Invalid command payload."));
                     return;
                 }
 
@@ -161,7 +158,8 @@ namespace XboxDebugConsole
                 {
                     HandleResponse(
                         GenericError(
-                            new Command.Request(Command.Type.Unknown, null), error ?? "Invalid command."));
+                            new Command.Request(Command.Type.Unknown, null), 
+                            error ?? "Invalid command."));
                     return;
                 }
 
@@ -187,6 +185,12 @@ namespace XboxDebugConsole
                 case Command.Type.LoadSymbols:
                     response = LoadSymbols(request);
                     break;
+                case Command.Type.Functions:
+                    response = GetFunctions(request);
+                    break;
+                //case Command.Type.Variables:
+                //    response = GetVariables(request);
+                //    break;
                 case Command.Type.SetBreakpoint:
                     response = SetBreakpoints(request);
                     break;
@@ -232,11 +236,16 @@ namespace XboxDebugConsole
                 case Command.Type.Reboot:
                     response = Reboot(request);
                     break;
+                case Command.Type.Mute:
+                    _NotificationsMuted = true;
+                    return;
+                case Command.Type.Unmute:
+                    _NotificationsMuted = false;
+                    return;
                 case Command.Type.Quit:
                 case Command.Type.Exit:
                     _IsRunning = false;
                     return;
-
                 case Command.Type.Question:
                 case Command.Type.Help:
                     if (!_JsonMode)
@@ -296,10 +305,42 @@ namespace XboxDebugConsole
             }
 
             if (args.ImageBase.HasValue)
+            {
                 _SymbolManager.SetImageBase(args.ImageBase.Value);
+            }
 
             return GenericSuccess(request, "Symbols loaded.");
         }
+
+        private static Command.Response GetFunctions(Command.Request request)
+        {
+            if (!_SymbolManager.Initialized())
+            {
+                return GenericError(request, "Symbols not loaded.");
+            }
+
+            var functions = _SymbolManager.GetFunctions()
+                .Select(f => new
+                {
+                    name = f.Name,
+                    rva = $"0x{f.Rva:X8}",
+                    address = $"0x{f.Address:X8}",
+                    length = f.Length
+                })
+                .ToArray();
+
+            if (functions.Length == 0)
+            {
+                return GenericError(request, "No functions found in symbols.");
+            }
+
+            return new Command.Response(request.Type, true, null, functions);
+        }
+
+        //private static Command.Response GetVariables(Command.Request request)
+        //{
+
+        //}
 
         static Command.Response Scan(Command.Request request)
         {
@@ -320,8 +361,10 @@ namespace XboxDebugConsole
             return new Command.Response(request.Type, true, null, xboxList);
         }
 
-        private static bool ConnectRaw(string ipAddress)
+        private static bool ConnectRaw(string ipAddress, out string? error)
         {
+            error = null;
+
             try
             {
                 _Xbox = new Xbox(_Logger);
@@ -329,12 +372,13 @@ namespace XboxDebugConsole
 
                 _Xbox.NotificationReceived += (sender, e) =>
                 {
-                    HandleNotification(e.Message);
+                    HandleNotification("notification", e.Message);
                 };
             }
-            catch
+            catch (Exception ex)
             {
                 Cleanup();
+                error = ex.Message;
                 return false;
             }
 
@@ -343,7 +387,7 @@ namespace XboxDebugConsole
 
         private static Command.Response Connect(Command.Request request)
         {
-            if (_Xbox != null)
+            if (XboxConnected())
             {
                 return GenericError(request, "Already connected to an Xbox. Please disconnect first.");
             }
@@ -382,9 +426,9 @@ namespace XboxDebugConsole
                 }
             }
 
-            if (!ConnectRaw(ipAddress))
+            if (!ConnectRaw(ipAddress, out string? error))
             {
-                return GenericError(request, $"Failed to connect to Xbox at {ipAddress}.");
+                return GenericError(request, error != null ? error : $"Failed to connect to Xbox at {ipAddress}");
             }
 
             return GenericSuccess(request, $"Successfully connected to Xbox at {ipAddress}.");
@@ -441,9 +485,17 @@ namespace XboxDebugConsole
                     var xbox = availableXboxes[i];
                     if (xbox.Ip.Equals(connectedIp))
                     {
-                        if (ConnectRaw(xbox.Ip.ToString()))
+                        if (ConnectRaw(xbox.Ip.ToString(), out string? error))
                         {
                             return GenericSuccess(request, "Xbox rebooted and reconnected successfully.");
+                        }
+                        else
+                        {
+                            return GenericError(
+                                request, 
+                                error != null ?
+                                    error : 
+                                    $"Rebooted Xbox found at {xbox.Ip} but failed to reconnect.");
                         }
                     }
                 }
@@ -644,7 +696,7 @@ namespace XboxDebugConsole
                 return NotConnectedError(request);
             }
 
-            if (request.Payload is not MemoryReadArgs args)
+            if (request.Payload is not Command.MemoryReadArgs args)
             {
                 return GenericError(request, "address and length are required for read command.");
             }
@@ -673,7 +725,7 @@ namespace XboxDebugConsole
                 return NotConnectedError(request);
             }
 
-            if (request.Payload is not MemoryWriteArgs args)
+            if (request.Payload is not Command.MemoryWriteArgs args)
             {
                 return GenericError(request, "address and data are required for write command.");
             }
@@ -697,7 +749,7 @@ namespace XboxDebugConsole
                 return NotConnectedError(request);
             }
 
-            if (request.Payload is not MemoryDumpArgs args)
+            if (request.Payload is not Command.MemoryDumpArgs args)
             {
                 return GenericError(request, "address, length and localPath are required for dump command.");
             }
@@ -951,14 +1003,13 @@ namespace XboxDebugConsole
             }
         }
 
-        static void PrintHelp()
+        private static void PrintHelp()
         {
-            ConsoleColor consoleColor = Console.ForegroundColor;
             Console.ForegroundColor = ConsoleColor.Gray;
             Console.WriteLine("==== Available commands ====");
             var consoleLimit = 64;
 
-            foreach (var desc in Command.HelpCatalog.Descriptions)
+            foreach (var desc in Command.Help.Descriptions)
             {
                 if (desc == null)
                 {
@@ -973,18 +1024,18 @@ namespace XboxDebugConsole
                 WriteWrapped(desc.Type, 2, consoleLimit);
 
                 Console.ForegroundColor = ConsoleColor.Gray;
-                WriteWrapped(desc.Description, 4, consoleLimit);
+                WriteWrapped(desc.Desc, 4, consoleLimit);
 
-                if (desc.Arguments != null)
+                if (desc.Args != null)
                 {
                     WriteWrapped("Params:", 4, consoleLimit);
 
-                    foreach (var arg in desc.Arguments)
+                    foreach (var arg in desc.Args)
                     {
                         Console.ForegroundColor = ConsoleColor.Yellow;
                         WriteWrapped(arg.Arg, 6, consoleLimit);
                         Console.ForegroundColor = ConsoleColor.Gray;
-                        WriteWrapped(arg.Description, 8, consoleLimit);
+                        WriteWrapped(arg.Desc, 8, consoleLimit);
                     }
                 }
                 Console.Write("\n");
@@ -996,17 +1047,10 @@ namespace XboxDebugConsole
             WriteWrapped("scan timeoutMs=5000", 2, consoleLimit);
             WriteWrapped("connect ip=192.168.0.1", 2, consoleLimit);
             Console.Write("\n");
-
-            Console.ForegroundColor = consoleColor;
+            Console.ResetColor();
         }
 
-        static uint ParseHex(string hex)
-        {
-            hex = hex.Replace("0x", "").Replace("0X", "");
-            return Convert.ToUInt32(hex, 16);
-        }
-
-        static void Cleanup()
+        private static void Cleanup()
         {
             if (_Xbox != null)
             {
@@ -1024,7 +1068,7 @@ namespace XboxDebugConsole
             _Breakpoints.Clear();
         }
 
-        static void PrintObject(object obj, int indent = 1)
+        private static void PrintObject(object obj, int indent = 1)
         {
             if (obj == null)
             {
@@ -1071,7 +1115,7 @@ namespace XboxDebugConsole
             }
         }
 
-        static void HandleNotification(string messageStr)
+        private static void HandleNotification(string type, string messageStr)
         {
             if (_NotificationsMuted)
             {
@@ -1080,6 +1124,7 @@ namespace XboxDebugConsole
 
             _XboxNotifications.Enqueue(new XboxNotification
             {
+                Type = type,
                 Timestamp = DateTime.UtcNow.ToString(),
                 Message = messageStr
             });

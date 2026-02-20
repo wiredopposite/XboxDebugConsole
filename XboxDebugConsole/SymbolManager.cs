@@ -29,6 +29,14 @@ namespace XboxDebugConsole
         public bool IsParameter { get; set; }
     }
 
+    class FunctionInfo
+    {
+        public required string Name { get; set; }
+        public uint Rva { get; set; }
+        public uint Address { get; set; }
+        public uint Length { get; set; }
+    }
+
     internal class SymbolManager
     {
         private enum DiaDataKind : uint
@@ -94,13 +102,8 @@ namespace XboxDebugConsole
 
             try
             {
-                // Create DIA data source
                 _diaDataSource = new DiaSource();
-
-                // Load the PDB file
                 _diaDataSource.loadDataFromPdb(pdbPath);
-
-                // Open a session
                 _diaDataSource.openSession(out _diaSession);
 
                 if (_diaSession == null)
@@ -108,21 +111,17 @@ namespace XboxDebugConsole
                     return false;
                 }
 
-                // Load symbols and line information
                 LoadSymbolsAndLines();
-
                 return true;
             }
-            catch (COMException ex)
+            catch //COMException ex)
             {
-                //Console.WriteLine($"Error loading PDB: {ex.Message}");
                 return false;
             }
-            catch (Exception ex)
-            {
-                //Console.WriteLine($"Unexpected error loading PDB: {ex.Message}");
-                return false;
-            }
+            //catch (Exception ex)
+            //{
+            //    return false;
+            //}
         }
 
         private void LoadSymbolsAndLines()
@@ -131,10 +130,8 @@ namespace XboxDebugConsole
 
             try
             {
-                // Get global scope
                 IDiaSymbol globalScope = _diaSession.globalScope;
 
-                // Enumerate all functions
                 IDiaEnumSymbols? enumSymbols = null;
                 globalScope.findChildren(SymTagEnum.SymTagFunction, null, 0, out enumSymbols);
 
@@ -160,7 +157,7 @@ namespace XboxDebugConsole
                     Marshal.ReleaseComObject(globalScope);
                 }
             }
-            catch (COMException ex)
+            catch //(COMException ex)
             {
                 //Console.WriteLine($"Error loading symbols: {ex.Message}");
             }
@@ -173,7 +170,6 @@ namespace XboxDebugConsole
                 string functionName = function.name ?? "Unknown";
                 uint functionRva = function.relativeVirtualAddress;
 
-                // Get line numbers for this function
                 IDiaEnumLineNumbers? enumLineNumbers = null;
                 _diaSession?.findLinesByRVA(functionRva, (uint)function.length, out enumLineNumbers);
 
@@ -194,7 +190,6 @@ namespace XboxDebugConsole
                     uint lineNum = lineNumber.lineNumber;
                     uint address = lineNumber.relativeVirtualAddress;
 
-                    // Add to file->address mapping
                     if (!_FileToAddresses.ContainsKey(fileKey))
                         _FileToAddresses[fileKey] = new List<LineMapping>();
 
@@ -205,7 +200,6 @@ namespace XboxDebugConsole
                         Address = address
                     });
 
-                    // Add to address->source mapping
                     _AddressesToSource[address] = new SourceLocation
                     {
                         File = fileName,
@@ -322,6 +316,100 @@ namespace XboxDebugConsole
             }
 
             return locals;
+        }
+
+        public IReadOnlyList<FunctionInfo> GetFunctions(string? fileFilter = null)
+        {
+            if (_diaSession == null)
+                return Array.Empty<FunctionInfo>();
+
+            var functions = new List<FunctionInfo>();
+            var fileKey = string.IsNullOrWhiteSpace(fileFilter) ? null : NormalizeFileKey(fileFilter);
+            IDiaSymbol globalScope = _diaSession.globalScope;
+            IDiaEnumSymbols? enumSymbols = null;
+            globalScope.findChildren(SymTagEnum.SymTagFunction, null, 0, out enumSymbols);
+
+            if (enumSymbols != null)
+            {
+                IDiaSymbol? symbol;
+                uint celt = 0;
+
+                while (true)
+                {
+                    enumSymbols.Next(1, out symbol, out celt);
+                    if (celt != 1 || symbol == null)
+                        break;
+
+                    if (fileKey != null && !FunctionMatchesFile(symbol, fileKey))
+                    {
+                        if (OperatingSystem.IsWindows())
+                            Marshal.ReleaseComObject(symbol);
+                        continue;
+                    }
+
+                    var rva = symbol.relativeVirtualAddress;
+                    functions.Add(new FunctionInfo
+                    {
+                        Name = symbol.name ?? "Unknown",
+                        Rva = rva,
+                        Address = ToAbsolute(rva),
+                        Length = (uint)symbol.length
+                    });
+
+                    if (OperatingSystem.IsWindows())
+                        Marshal.ReleaseComObject(symbol);
+                }
+            }
+
+            if (OperatingSystem.IsWindows())
+            {
+                if (enumSymbols != null)
+                    Marshal.ReleaseComObject(enumSymbols);
+                Marshal.ReleaseComObject(globalScope);
+            }
+
+            return functions;
+        }
+
+        private bool FunctionMatchesFile(IDiaSymbol function, string fileKey)
+        {
+            IDiaEnumLineNumbers? enumLineNumbers = null;
+            _diaSession?.findLinesByRVA(function.relativeVirtualAddress, (uint)function.length, out enumLineNumbers);
+
+            if (enumLineNumbers == null)
+                return false;
+
+            IDiaLineNumber? lineNumber;
+            uint celt = 0;
+            var matched = false;
+
+            while (true)
+            {
+                enumLineNumbers.Next(1, out lineNumber, out celt);
+                if (celt != 1 || lineNumber == null)
+                    break;
+
+                var sourceFile = lineNumber.sourceFile;
+                var name = sourceFile.fileName ?? string.Empty;
+                if (NormalizeFileKey(name).Equals(fileKey, StringComparison.OrdinalIgnoreCase))
+                {
+                    matched = true;
+                }
+
+                if (OperatingSystem.IsWindows())
+                {
+                    Marshal.ReleaseComObject(sourceFile);
+                    Marshal.ReleaseComObject(lineNumber);
+                }
+
+                if (matched)
+                    break;
+            }
+
+            if (OperatingSystem.IsWindows())
+                Marshal.ReleaseComObject(enumLineNumbers);
+
+            return matched;
         }
 
         private uint? ResolveAddress(IDiaSymbol symbol, uint frameBase, IReadOnlyDictionary<uint, uint>? registers)
